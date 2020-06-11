@@ -1,0 +1,798 @@
+---
+title: "台灣安樂死合法化之議題討論"
+author: "第14組"
+date: "`r Sys.time()`"
+output:
+  html_document:
+    highlight: pygments
+    theme: flatly
+    css: etc/style.css
+---
+
+```{r}
+Sys.setlocale("LC_CTYPE", "cht") # 避免中文亂碼
+```
+
+## 安裝需要的packages
+```{r}
+packages = c("readr", "dplyr", "stringr", "jiebaR", "tidytext", "NLP", "readr", "tidyr", "ggplot2", "ggraph", "igraph", "scales", "reshape2", "widyr","tm", "data.table","topicmodels", "LDAvis", "webshot","purrr","ramify","RColorBrewer", "htmlwidgets","servr","wordcloud2")
+
+existing = as.character(installed.packages()[,1])
+for(pkg in packages[!(packages %in% existing)]) install.packages(pkg)
+```
+
+```{r}
+library(pacman)
+library(igraph)
+library(widyr)
+require(readr)
+require(dplyr)
+require(stringr)
+require(jiebaR)
+require(tidytext)
+require(NLP)
+require(tidyr)
+require(ggplot2)
+require(ggraph)
+require(igraph)
+require(scales)
+require(reshape2)
+require(widyr)
+require(tm)
+require(data.table)
+require(udpipe)
+require(ggplot2)
+require(topicmodels)
+require(LDAvis)
+require(wordcloud2)
+require(webshot)
+require(htmlwidgets)
+require(servr)
+require(purrr)
+require(ramify)
+require(RColorBrewer)
+
+mycolors <- colorRampPalette(brewer.pal(10, "Spectral"))(10)
+```
+
+## 資料描述
++ 透過中山管院文字分析平台，取得PTT Gossiping版2017-01-03 ~ 2020-06-07的資料，以關鍵字為"安樂死"，共取得850篇文章，33342筆回覆 <br>
+
++ 原先欲從安樂死合法案於公共政策網路參與平台上發布的日期2016-09-09開始搜尋資料，但一直到2016-11-03附議通過PTT上都還沒有討論度，一直到2017-01-03才開始漸漸有人討論，其後每個月的討論聲量都有一定熱度 <br>
+
+## 動機
++ 死亡是必然會發生的，但經過痛苦及磨難才發生的死亡，與安寧祥和的死亡終究是不一樣的，我們常說：人生是自己掌控的，那在一段生命的最後決定權，又為何是給別人決定的？因此開始有人提案對於生命的自主權以及安樂善終權，透過安寧緩和的醫療，拒絕那些強迫你接受的醫療處置，讓病人走的祥和且有尊嚴。
+
++ 安樂死合法案主要有以下兩點：第一、80歲以上、有不治之疾者；第二、年輕人，被醫生證明是絕症者，前提都是自願、沒犯法、沒欠稅，得享有「安樂善終權」。 <br>
+
++ 我們將探討PTT上對於安樂死的看法、支持度，以及與動物安樂死中間的討論用詞差異。
+
+## 從PTT的Gossiping版取得資料
+
+```{r}
+# 取得文章
+Euthanasia<- read_csv("./final_project_articleMetaData.csv") %>%
+              mutate(sentence=gsub("[\n]{2,}", "。", sentence)) # 將兩個以上換行符號轉成句號
+Euthanasia
+```
+
+```{r}
+# 取得回覆資料
+reviews <- read_csv("./final_project_articleReviews.csv")
+reviews
+```
+
+### 簡單看一下資料集
+發現2018/06/07為討論高峰，回顧事件發現當天為傅達仁安樂死執行日
+```{r}
+Euthanasia %>% 
+  group_by(artDate) %>%
+  summarise(count = n())%>%
+  ggplot(aes(artDate,count))+
+  geom_line(color="blue", size=1)
+```
+
+## 對全部的文章進行斷句，並儲存結果
+```{r}
+# 以全形或半形 驚歎號、問號、分號 以及 全形句號 爲依據進行斷句
+Euthanasia_sentences <- strsplit(Euthanasia$sentence,"[。！；？!?;]")
+```
+
+```{r}
+# 將每句句子，與他所屬的文章連結配對起來，整理成一個dataframe
+Euthanasia_sentences <- data.frame(
+                        artUrl = rep(Euthanasia$artUrl, sapply(Euthanasia_sentences, length)), 
+                        sentence = unlist(Euthanasia_sentences)
+                      ) %>%
+                      filter(!str_detect(sentence, regex("^(\t|\n| )*$")))
+
+Euthanasia_sentences$sentence <- as.character(Euthanasia_sentences$sentence)
+```
+
+
+## 接着做斷詞
+### 1.初始化斷詞器
+```{r}
+# 使用默認參數初始化一個斷詞引擎
+# 先不使用任何的字典和停用詞
+jieba_tokenizer = worker()
+
+chi_tokenizer <- function(t) {
+  lapply(t, function(x) {
+    if(nchar(x)>1){
+      tokens <- segment(x, jieba_tokenizer)
+      # 去掉字串長度爲1的詞彙
+      tokens <- tokens[nchar(tokens)>1]
+      return(tokens)
+    }
+  })
+}
+```
+
+### 2.斷詞與整理斷詞結果
+進行斷詞，並計算各詞彙在各文章中出現的次數
+```{r}
+Euthanasia_words <- Euthanasia_sentences %>%
+  unnest_tokens(word, sentence, token=chi_tokenizer) %>%
+  filter(!str_detect(word, regex("[0-9a-zA-Z]"))) %>%
+  count(artUrl, word, sort = TRUE)
+Euthanasia_words
+```
+
+計算每篇文章包含的詞數
+```{r}
+total_words <- Euthanasia_words %>% 
+  group_by(artUrl) %>% 
+  summarize(total = sum(n))
+total_words
+```
+
+合併 Euthanasia_words（每個詞彙在每個文章中出現的次數） <br>
+與 total_words（每篇文章的詞數） <br>
+新增各個詞彙在所有詞彙中的總數欄位 <br>
+```{r}
+Euthanasia_words <- left_join(Euthanasia_words, total_words)
+Euthanasia_words
+```
+
+## 以LIWC情緒字典分析
+
+### 載入LIWC情緒字典
+```{r}
+# 正向字典txt檔
+P <- read_file("liwc/positive.txt")
+
+# 負向字典txt檔
+N <- read_file("liwc/negative.txt")
+
+#將字串依,分割
+#strsplit回傳list , 我們取出list中的第一個元素
+P = strsplit(P, ",")[[1]]
+N = strsplit(N, ",")[[1]]
+
+# 建立dataframe 有兩個欄位word,sentiments，word欄位內容是字典向量
+P = data.frame(word = P, sentiment = "positive")
+N = data.frame(word = N, sentiment = "negative")
+
+LIWC = rbind(P, N)
+```
+
+### 統計每天的文章正面字的次數與負面字的次數
++ 發現正面字術語負面字數的最高峰都在2018年的6月7日，與前述提及當日文章討論數最高的為同一天 <br>
++ 正面字數次高為2019年的5月22日（共190字），依序為5月21日（共111字） <br>
++ 負面字數次高為2019年的5月21日（共167字），依序為5月22日（共126字） <br>
+
+> 發現2018/06/07為傅達仁安樂死執行日：https://disp.cc/b/163-aF0S
+> 而2019/05/21為朗伯爾安樂死執行日：https://www.ptt.cc/bbs/Gossiping/M.1558454127.A.21F.html	
+
+```{r}
+#先把artDate放進來
+A <- left_join(Euthanasia_words,Euthanasia) %>% select(-artTitle,-artTime,-artPoster,-artCat,-commentNum,-push,-boo,-sentence)
+
+#統計每篇文章中正負面字詞分別有多少
+sentiment_count = A %>%
+  select(artDate,word,n) %>%
+  inner_join(LIWC) %>% 
+  group_by(artDate,sentiment) %>%
+  summarise(count=sum(n))
+
+#時間太長會不好看出結果，因此分年度觀看
+#2017年
+sentiment_count %>%
+  ggplot()+
+  geom_line(aes(x=artDate,y=count,colour=sentiment))+
+  xlim(as.Date(c("2017-01-03","2017-12-31"))) +
+  ylim(c(0,100))
+
+#2018年
+sentiment_count %>%
+  ggplot()+
+  geom_line(aes(x=artDate,y=count,colour=sentiment))+
+  xlim(as.Date(c("2018-01-01","2018-12-31")))+
+  geom_vline(aes(xintercept = as.numeric(artDate[which(sentiment_count$artDate == as.Date('2018/06/07'))[1]])),colour = "red") 
+
+#2019年
+sentiment_count %>%
+  ggplot()+
+  geom_line(aes(x=artDate,y=count,colour=sentiment))+
+  xlim(as.Date(c("2019-01-01","2019-12-31")))+
+  ylim(c(0,200))+
+  geom_vline(aes(xintercept = as.numeric(artDate[which(sentiment_count$artDate == as.Date('2019/05/21'))[1]])),colour = "red") 
+
+#2020年
+sentiment_count %>%
+  ggplot()+
+  geom_line(aes(x=artDate,y=count,colour=sentiment))+
+  xlim(as.Date(c("2020-01-01","2020-06-07")))+
+  ylim(c(0,25))
+```
+
+### 抓出傅達仁安樂死當日（2018-06-07）的文章正負面用詞
+```{r}
+A %>%
+  filter(artDate == as.Date('2018/06/07')) %>% 
+  inner_join(LIWC) %>%
+  group_by(word,sentiment) %>%
+  summarise(
+    count = n()
+  ) %>% data.frame() %>% 
+  top_n(30,wt = count) %>%
+  ungroup() %>% 
+  mutate(word = reorder(word, count)) %>%
+  ggplot(aes(word, count, fill = sentiment)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~sentiment, scales = "free_y") +
+  labs(y = "Contribution to sentiment",
+       x = NULL) +
+  theme(text=element_text(size=14))+
+  coord_flip()
+```
+
+### 抓出朗貝爾安樂死當日（2019-05-21）的文章正負面用詞
+```{r}
+A %>%
+  filter(artDate == as.Date('2019/05/21')) %>% 
+  inner_join(LIWC) %>%
+  group_by(word,sentiment) %>%
+  summarise(
+    count = n()
+  ) %>% data.frame() %>% 
+  top_n(30,wt = count) %>%
+  ungroup() %>% 
+  mutate(word = reorder(word, count)) %>%
+  ggplot(aes(word, count, fill = sentiment)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~sentiment, scales = "free_y") +
+  labs(y = "Contribution to sentiment",
+       x = NULL) +
+  theme(text=element_text(size=14))+
+  coord_flip()
+```
+
+> 發現同樣都是安樂死經常出現的正面字詞都差不多，而主動安樂死（正面個案）出現的負面字詞較為類似；反觀被動安樂死（負面個案）出現的負面字詞較為多元。
+
+## 計算 tf-idf
+```{r}
+# 以每篇文章爲單位，計算每個詞彙在的tf-idf值
+Euthanasia_words_tf_idf <- Euthanasia_words %>%
+  bind_tf_idf(word, artUrl, n)
+
+Euthanasia_words_tf_idf
+```
+
+```{r}
+# 選出每篇文章，tf-idf最大的十個詞
+Euthanasia_words_tf_idf %>% 
+  group_by(artUrl) %>%
+  top_n(10) %>%
+  arrange(desc(artUrl))
+```
+
+```{r}
+# 選每篇文章，tf-idf最大的十個詞，
+# 並查看每個詞被選中的次數
+Euthanasia_words_tf_idf %>% 
+  group_by(artUrl) %>%
+  top_n(10) %>%
+  arrange(desc(artUrl)) %>%
+  ungroup() %>%
+  count(word, sort=TRUE)
+```
+
+> 因爲我們是以每篇文章爲一個document單位（總共有850個document）<br>
+  因此我們就不畫課本第三章中，比較各document中tf-idf較高的詞彙比較圖
+
+## jiebar and ngrams
+### bigram function
+```{r}
+#初始化
+jieba_tokenizer = worker()
+
+# unnest_tokens 使用的bigram分詞函數
+# Input: a character vector
+# Output: a list of character vectors of the same length
+jieba_bigram <- function(t) {
+  lapply(t, function(x) {
+    if(nchar(x)>1){
+      tokens <- segment(x, jieba_tokenizer)
+      bigram<- ngrams(tokens, 2)
+      bigram <- lapply(bigram, paste, collapse = " ")
+      unlist(bigram)
+    }
+  })
+}
+```
+
+```{r}
+# 執行bigram分詞
+Euthanasia_bigram <- Euthanasia %>%
+  unnest_tokens(bigram, sentence, token = jieba_bigram)
+Euthanasia_bigram
+```
+
+```{r}
+# 清楚包含英文或數字的bigram組合
+# 計算每個組合出現的次數
+Euthanasia_bigram %>%
+  filter(!str_detect(bigram, regex("[0-9a-zA-Z]"))) %>%
+  count(bigram, sort = TRUE)
+```
+
+### trigram function
+```{r}
+#初始化
+jieba_tokenizer = worker()
+
+jieba_trigram <- function(t) {
+  lapply(t, function(x) {
+    if(nchar(x)>1){
+      tokens <- segment(x, jieba_tokenizer)
+      ngram<- ngrams(unlist(tokens), 3)
+      ngram <- lapply(ngram, paste, collapse = " ")
+      unlist(ngram)
+    }
+  })
+}
+```
+
+```{r}
+# 執行trigram分詞
+Euthanasia_trigram <- Euthanasia %>%
+  unnest_tokens(ngrams, sentence, token = jieba_trigram)
+Euthanasia_trigram %>%
+  filter(!str_detect(ngrams, regex("[0-9a-zA-Z]"))) %>%
+  count(ngrams, sort = TRUE)
+```
+
+> 上方的結果可以發現有很多包含停止詞的trigram組合，所以我們接著將stopwords清除再看看又什麼新組合
+
+## Remove stop words
+### 載入stop words字典
+```{r}
+#load stop words
+stop_words <- scan(file = "stop_words.txt", what=character(),sep='\n',encoding='utf-8')
+```
+
+```{r}
+# remove the stop words in bigram
+Euthanasia_bigram %>%
+  filter(!str_detect(bigram, regex("[0-9a-zA-Z]"))) %>%
+  separate(bigram, c("word1", "word2"), sep = " ") %>% 
+  filter(!(word1 %in% stop_words), !(word2 %in% stop_words)) %>%
+  count(word1, word2, sort = TRUE) %>%
+  unite_("bigram", c("word1","word2"), sep=" ")
+```
+
+```{r}
+# remove the stop words in trigram
+Euthanasia_trigram %>%
+  filter(!str_detect(ngrams, regex("[0-9a-zA-Z]"))) %>%
+  separate(ngrams, c("word1", "word2", "word3"), sep = " ") %>% 
+  filter(!(word1 %in% stop_words), !(word2 %in% stop_words), !(word3 %in% stop_words)) %>%
+  count(word1, word2, word3, sort = TRUE) %>%
+  unite_("ngrams", c("word1", "word2", "word3"), sep=" ")
+```
+
+> 從上面的bigram和trigram的結果中，我們可以整理出一個更好的斷詞字典。<br>
+  我們將詞彙整理好存在dict文件夾中的 euthanasia_lexicon.txt 中
+  
+### 載入安樂死字典
+```{r}
+# load euthanasia_lexicon
+euthanasia_lexicon <- scan(file = "euthanasia_lexicon.txt", what=character(),sep='\n', encoding='utf-8')
+```
+
+## bigram
+```{r}
+jieba_tokenizer = worker()
+
+# 使用疫情相關字典重新斷詞
+# 把否定詞也加入斷詞
+new_user_word(jieba_tokenizer, c(euthanasia_lexicon))
+
+chi_tokenizer <- function(t) {
+  lapply(t, function(x) {
+    if(nchar(x)>1){
+      tokens <- segment(x, jieba_tokenizer)
+      tokens <- tokens[!tokens %in% stop_words]
+      # 去掉字串長度爲1的詞彙
+      tokens <- tokens[nchar(tokens)>1]
+      return(tokens)
+    }
+  })
+}
+```
+
+
+## Word Correlation
+```{r}
+# 剛才的斷詞結果沒有使用新增的辭典，
+# 因此我們重新進行斷詞，再計算各詞彙在各文章中出現的次數
+Euthanasia_words <- Euthanasia_sentences %>%
+  unnest_tokens(word, sentence, token=chi_tokenizer) %>%
+  filter(!str_detect(word, regex("[0-9a-zA-Z]"))) %>%
+  count(artUrl, word, sort = TRUE)
+Euthanasia_words
+```
+
+```{r}
+# 計算兩個詞彙同時出現的總次數
+word_pairs <- Euthanasia_words %>%
+  pairwise_count(word, artUrl, sort = TRUE)
+
+word_pairs
+```
+
+```{r}
+# 計算兩個詞彙間的相關性
+word_cors <- Euthanasia_words %>%
+  group_by(word) %>%
+  filter(n() >= 20) %>%
+  pairwise_cor(word, artUrl, sort = TRUE)
+
+word_cors
+```
+
+```{r}
+# 與安樂死相關性高的詞彙
+word_cors %>%
+  filter(item1 == "安樂死") %>% 
+  head(10)
+```
+
+```{r}
+# 分別尋找與 "傅達仁", "流浪狗"相關性最高的 10 個詞彙
+word_cors %>%
+  filter(item1 %in% c("傅達仁", "流浪狗")) %>%
+  group_by(item1) %>%
+  top_n(10) %>%
+  ungroup() %>%
+  mutate(item2 = reorder(item2, correlation)) %>%
+  ggplot(aes(item2, correlation)) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~ item1, scales = "free") +
+  coord_flip()
+```
+
+
+## 共現性  
+```{r}
+Euthanasia_words_cors <-Euthanasia_words %>%
+  group_by(word) %>%
+  filter(n() >= 10) %>%
+  pairwise_cor(word, artUrl, sort = TRUE)
+```
+
+```{r}
+set.seed(2016)
+Euthanasia_words_cors %>%
+  filter(abs(correlation) > .5 & abs(correlation)<=1 ) %>%
+  graph_from_data_frame() %>%
+  ggraph(layout = "fr") +
+  geom_edge_link(aes(edge_alpha = correlation), show.legend = FALSE) +
+  geom_node_point(color = "lightblue", size = 5) +
+  geom_node_text(aes(label = name), repel = TRUE) +
+  theme_void()
+```
+
+
+### DTM
+
+## 將資料轉換為Document Term Matrix (DTM)
+
+初始化斷詞引擎，並加入停用字
+```{r}
+jieba_tokenizer = worker(stop_word = "stop_words.txt")
+jieba_tokenizer <- worker(user="euthanasia_lexicon.txt", stop_word = "stop_words.txt")
+
+#去掉字串長度爲1的詞彙
+Euthanasia_tokenizer <- function(t) {
+  lapply(t, function(x) {
+    if(nchar(x)>1){
+      tokens <- segment(x, jieba_tokenizer)
+      tokens <- tokens[nchar(tokens)>1] 
+      return(tokens)
+    }
+  })
+}
+
+#過濾特殊字元
+tokens <- Euthanasia_sentences %>%
+  mutate(id=c(1:nrow(Euthanasia_sentences))) %>%
+  unnest_tokens(word, sentence, token=chi_tokenizer) %>%
+  filter(!str_detect(word, regex("[0-9a-zA-Z]")))
+```
+
+```{r}
+tokens_dtm <- tokens %>%
+  count(artUrl, word) %>%
+  rename(count=n)
+
+Euthanasia_dtm <- tokens_dtm %>% 
+  cast_dtm(artUrl, word, count) 
+
+Euthanasia_dtm
+
+inspect(Euthanasia_dtm[1:10,1:10])  #查看前十筆資料 
+```
+
+> 查看DTM矩陣，可以發現是個稀疏矩陣。 
+
+### 建立LDA模型
+嘗試2,5,10,15,25主題數，將結果存起來，再做進一步分析
+```{r eval=FALSE}
+# ldas = c()
+# topics = c(2,5,10,15,25)
+# for(topic in topics){
+#   start_time <- Sys.time()
+#   lda <- LDA(Euthanasia_dtm, k = topic, control = list(seed = 1234))
+#   ldas =c(ldas,lda)
+#   print(paste(topic ,paste("topic(s) and use time is ", Sys.time() -start_time)))
+#   save(ldas,file = "ldas_result")
+# }
+```
+
+>因為需要執行較久，所以已將主題結果存在lda_result
+
+載入每個主題的LDA結果
+```{r}
+load("ldas_result")
+```
+
+透過perplexity找到最佳主題數
+```{r}
+topics = c(2,5,10,15,25)
+data_frame(k = topics,
+           perplex = map_dbl(ldas, topicmodels::perplexity)) %>%
+  ggplot(aes(k, perplex)) +
+  geom_point() +
+  geom_line() +
+  labs(title = "Evaluating LDA topic models",
+       subtitle = "Optimal number of topics (smaller is better)",
+       x = "Number of topics",
+       y = "Perplexity")
+```
+
+> perplexity 越小越好，但是太小的話，主題數會分太細。通常會找一個主題數適當，且perplexity比較低的主題。
+因此，在後續分析時，本組將分為 "10個"主題。
+
+### $\phi$ Matrix
+查看各個主題的單詞組成比率
+```{r}
+Euthanasia_lda = ldas[[3]] ## 選定topic 為10 的結果
+
+topics <- tidy(Euthanasia_lda, matrix = "beta") # 注意，在tidy function裡面要使用"beta"來取出Phi矩陣。
+topics
+```
+
+> 每一行代表一個主題中的一個詞彙
+
+
+## 尋找Topic的代表字
++ 整理出每一個Topic中生成概率最高的10個詞彙。
+
+```{r}
+#取出每一個Topic中生成概率最高(beta值最高)的10個詞彙
+top_terms <- topics %>%
+  group_by(topic) %>%
+  top_n(10, beta) %>% 
+  ungroup() %>%
+  arrange(topic, -beta)
+
+#繪製長條圖
+top_terms %>%
+  mutate(topic = as.factor(topic),
+      term = reorder_within(term, beta, topic)) %>%
+    ggplot(aes(term, beta, fill = topic))  +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free") +
+  coord_flip()+
+  scale_x_reordered()
+```
+
+> 可以看到topic都被一開始所使用的搜尋關鍵字影響看不出每一群的差異。
+
+移除常出現、跨主題共享的詞彙，並未主題命名。
+```{r}
+remove_word = c("安樂死","生命","自殺","台灣","老人","病人")
+top_terms <- topics %>%
+  filter(!term  %in% remove_word)%>%
+  group_by(topic) %>%
+  top_n(10, beta) %>%
+  ungroup() %>%
+  arrange(topic, -beta)
+
+# New facet label names for supp variable
+tn=topic_name<- c('病人自主權利','安樂死法案連署','安樂死民意調查','瑞士合法安樂死','法國安樂死爭議','台灣首位安樂死','主動 V.S. 被動安樂死','植物人安樂死','動物安樂死','台大張振聲')
+names(topic_name) <- c(1:10)
+
+top_terms %>%
+  mutate(topic = as.factor(topic),
+      term = reorder_within(term, beta, topic)) %>%
+    ggplot(aes(term, beta, fill = topic))  +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ topic, scales = "free",labeller = labeller(topic = topic_name)) +
+  coord_flip()+
+  scale_x_reordered()
+```
+
+## Document 主題分佈
+```{r}
+# for every document we have a probability distribution of its contained topics
+tmResult <- posterior(Euthanasia_lda)
+doc_pro <- tmResult$topics 
+dim(doc_pro)               # nDocs(DTM) distributions over K topics
+```
+> 每篇文章都有topic的分佈，所以總共是：850筆的文章*10個主題
+
+
+### cbind Document 主題分佈
+查看每一篇文章的各個主題組成比率
+```{r}
+# get document topic proportions 
+document_topics <- doc_pro[Euthanasia$artUrl,]
+document_topics_df =data.frame(document_topics)
+colnames(document_topics_df) = tn
+rownames(document_topics_df) = NULL
+Euthanasia_topic = cbind(Euthanasia,document_topics_df)  
+```
+
+
+### 查看特定主題的文章
++ 透過找到特定文章的分佈進行排序之後，可以看到此主題的比重高的文章在討論什麼。
+```{r ,eval=FALSE}
+Euthanasia_topic %>%
+  arrange(desc(`動物安樂死`)) %>%
+  head(10) 
+```
+
+> 可以看到"動物安樂死"這個主題主要在探討流量動物的安置問題與安樂死議題。
+
+### 了解主題在時間的變化
+```{r warning=FALSE}
+
+Euthanasia_topic[,c(11:20)] =sapply(Euthanasia_topic[,c(11:20)] , as.numeric)
+
+Euthanasia_topic %>% 
+  select(artDate,病人自主權利:台大張振聲)%>%
+  group_by(artDate = format(artDate,"%Y%m")) %>%
+  summarise_if(is.double, sum, na.rm = TRUE) %>%
+  melt(id.vars = "artDate")%>%
+ ggplot( aes(x=artDate, y=value, fill=variable)) + 
+  geom_bar(stat = "identity") + ylab("value") + 
+  scale_fill_manual(values=mycolors)+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+> 由於安樂死每個月討論量變化較大，因此接下來將挑出討論量前15的月份進行探討。
+
+
+#### 以比例了解主題時間變化
+```{r warning=FALSE}
+Euthanasia_topic %>% 
+  select(artDate,病人自主權利:台大張振聲)%>%
+  group_by(artDate = format(artDate,"%Y%m")) %>%
+  summarise_if(is.double, sum, na.rm = TRUE) %>%
+  melt(id.vars = "artDate")%>%
+  group_by(artDate)%>%
+  mutate(total_value =sum(value))%>%
+  filter(total_value>15)%>%
+ ggplot( aes(x=artDate, y=value/total_value, fill=variable)) + 
+  geom_bar(stat = "identity") + ylab("proportion") + 
+      scale_fill_manual(values=mycolors)+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+> "安樂死法案聯署"與"動物安樂死"議題會在特定時間有較多的討論量，其他議題的討論量變化則較不明顯。
+
+
+### LDAvis
+
+## json function
+
++ 產生create LDAvis所需的json function
++ 此function是將前面使用 "LDA function"所建立的model，轉換為"LDAVis"套件的input格式。
+
+```{r}
+topicmodels_json_ldavis <- function(fitted, doc_term){
+    require(LDAvis)
+    require(slam)
+  
+  
+ls_LDA = function (phi)
+{
+  jensenShannon <- function(x, y) {
+      m <- 0.5 * (x + y)
+    lhs <- ifelse(x == 0, 0, x * (log(x) - log(m+1e-16)))
+    rhs <- ifelse(y == 0, 0, y * (log(y) - log(m+1e-16)))
+    0.5 * sum(lhs) + 0.5 * sum(rhs)
+  }
+  dist.mat <- proxy::dist(x = phi, method = jensenShannon)
+  pca.fit <- stats::cmdscale(dist.mat, k = 2)
+  data.frame(x = pca.fit[, 1], y = pca.fit[, 2])
+}
+
+    # Find required quantities
+    phi <- as.matrix(posterior(fitted)$terms)
+    theta <- as.matrix(posterior(fitted)$topics)
+    vocab <- colnames(phi)
+    term_freq <- slam::col_sums(doc_term)
+
+    # Convert to json
+    json_lda <- LDAvis::createJSON(phi = phi, theta = theta,
+                            vocab = vocab,
+                            doc.length = as.vector(table(doc_term$i)),
+                            term.frequency = term_freq, mds.method = ls_LDA)
+
+    return(json_lda)
+}
+```
+
+
+## 產生LDAvis結果
+
+```{r eval=FALSE}
+#設置alpha及delta參數
+# devotion_lda_removed <- LDA(devotion_dtm_removed, k = 4, method = "Gibbs", control = list(seed = 1234, alpha = 2, delta= 0.1))
+
+####### 以下用來產生ldavis的檔案，可以之後用來在local端、放在網路上打開 ##########
+ for(lda in ldas){
+ 
+   k = lda@k ## lda 主題數
+   if(k==2){next}
+   json_res <- topicmodels_json_ldavis(lda,Euthanasia_dtm)
+   #serVis(json_res,open.browser = T)
+   lda_dir =  paste0(k,"_ldavis")
+   if(!dir.exists(lda_dir)){ dir.create("./",lda_dir)}
+ 
+   serVis(json_res, out.dir =lda_dir, open.browser = T)
+ 
+   writeLines(iconv(readLines(paste0(lda_dir,"/lda.json")), to = "UTF8"))
+ }
+
+#topic_10 = ldas[[3]]
+#json_res <- topicmodels_json_ldavis(topic_10,Euthanasia_dtm)
+
+#serVis(json_res,open.browser = T)
+
+# serVis(json_res, out.dir = "vis", open.browser = T)
+# writeLines(iconv(readLines("./vis/lda.json"), to = "UTF8"))
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
